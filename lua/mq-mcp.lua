@@ -123,6 +123,7 @@ local function build_tlo_types(max_scan)
                 inherits = (parent and parent ~= '') and parent or nil,
             }
         end
+        mq.delay()  -- yield between types so the game loop stays responsive
     end
 
     log(string.format('TLO type map built: %d types', #type_names))
