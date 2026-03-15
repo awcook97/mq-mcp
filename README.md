@@ -50,11 +50,11 @@ Copy `config.json.example` to `config.json` and set your MQ lua path:
 
 ```json
 {
-    "mq_lua_path": "C:\\Users\\you\\AppData\\Local\\YourServer\\Emu\\Release\\lua"
+    "mq_lua_path": "path\\to\\your\\mq\\lua"
 }
 ```
 
-That's the only required change. Optionally set `mq_definitions_path` to a local [mq-definitions](https://github.com/macroquest/mq-definitions) clone for richer TLO docs — if omitted the bundled copy is used.
+That's the only required change. Optionally set `mq_definitions_path` to a local [mq-definitions](https://github.com/macroquest/mq-definitions) clone for richer TLO docs (member descriptions, types, signatures). Without it, the TLO reference will include member names from runtime introspection but no documentation.
 
 ### 3. Install the in-game Lua script
 
