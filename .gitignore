@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Config (contains local paths)
+config.json
+
+# mq-definitions bundled clone (fetched at setup)
+mq-definitions/
+
+# Proto generated files
+proto/*_pb2.py
+proto/*_pb2_grpc.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
