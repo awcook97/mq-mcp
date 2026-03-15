@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,17 +13,6 @@ log = logging.getLogger(__name__)
 cfg    = load_config()
 actor  = MQActorClient(cfg.pipe_name, cfg.actor_name, cfg.actor_mailbox)
 mcp    = FastMCP("mq-mcp")
-
-
-# ------------------------------------------------------------------
-# Lifecycle
-# ------------------------------------------------------------------
-
-async def _connect_actor():
-    try:
-        actor.connect()
-    except Exception as e:
-        log.warning("Could not connect to MQ pipe: %s — tools will fail until MQ is running", e)
 
 
 # ------------------------------------------------------------------
@@ -137,12 +125,11 @@ async def refresh_tlo_types() -> str:
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(_start())
-
-
-async def _start():
-    await _connect_actor()
-    await mcp.run_async()
+    try:
+        actor.connect()
+    except Exception as e:
+        log.warning("Could not connect to MQ pipe: %s — game state tools will fail until MQ is running", e)
+    asyncio.run(mcp.run_stdio_async())
 
 
 if __name__ == "__main__":
