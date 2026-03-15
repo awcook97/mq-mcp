@@ -5,17 +5,10 @@
 --- Registers the mailbox 'mq-mcp' and handles RPC requests from the
 --- Python MCP server. Responds with JSON-encoded game state.
 
-local mq      = require('mq')
-local actors  = require('actors')
-
--- cjson is installed via MQ's luarocks; dkjson as fallback
-local ok, json = pcall(require, 'cjson')
-if not ok then
-    ok, json = pcall(require, 'dkjson')
-    if not ok then
-        error('No JSON library found. Expected cjson or dkjson.')
-    end
-end
+local mq         = require('mq')
+local actors     = require('actors')
+local PackageMan = require('mq/PackageMan')
+local json       = PackageMan.Require('lua-cjson', 'cjson')
 
 local MAILBOX = 'mq-mcp'
 
