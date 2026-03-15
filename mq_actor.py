@@ -170,8 +170,11 @@ class MQActorClient:
         self._pipe: Optional[object] = None
         self._running = False
         self._write_lock = threading.Lock()
-        self._mq_pid:  Optional[int] = None   # EQ/MQ process PID, learned on connect
-        self._mq_uuid: Optional[str] = None  # EQ/MQ process UUID, learned on connect
+
+        # All known EQ clients keyed by UUID.
+        # Each entry: {uuid, pid, account, server, character}
+        self._mq_clients: dict[str, dict] = {}
+        self._clients_lock = threading.Lock()
 
         self._seq      = 0
         self._seq_lock = threading.Lock()
@@ -233,10 +236,42 @@ class MQActorClient:
     # RPC
     # ------------------------------------------------------------------
 
-    async def call(self, mailbox: str, message: dict, timeout: float = 10.0) -> dict:
-        """Send an RPC request to a Lua Actor mailbox and await the response."""
+    def list_clients(self) -> list[dict]:
+        """Return all currently known EQ clients."""
+        with self._clients_lock:
+            return list(self._mq_clients.values())
+
+    def get_client(self, character: str = "") -> Optional[dict]:
+        """Return a specific client by character name, or the first available client."""
+        with self._clients_lock:
+            if not self._mq_clients:
+                return None
+            if not character:
+                return next(iter(self._mq_clients.values()))
+            name_lower = character.lower()
+            for client in self._mq_clients.values():
+                if client["character"].lower() == name_lower:
+                    return client
+            return None
+
+    async def call(self, mailbox: str, message: dict, timeout: float = 10.0,
+                   character: str = "") -> dict:
+        """Send an RPC request to a Lua Actor mailbox and await the response.
+
+        Args:
+            mailbox:   Fully-qualified Lua actor mailbox (e.g. 'lua:mq-mcp:mq-mcp')
+            message:   Request payload dict
+            timeout:   Seconds to wait for reply
+            character: Route to this character's EQ process. Defaults to first client.
+        """
         if not self.is_connected():
             raise MQNotConnectedError("Not connected to MQ pipe")
+
+        client = self.get_client(character)
+        if not client:
+            raise MQNotConnectedError(
+                f"No EQ client found{f' for character {character!r}' if character else ''}"
+            )
 
         seq    = self._next_seq()
         loop   = asyncio.get_running_loop()
@@ -253,17 +288,11 @@ class MQActorClient:
         # DeliverTo's exact unordered_map lookup finds the registered mailbox.
         # e.g. script mq-mcp.lua registering mailbox "mq-mcp" → "lua:mq-mcp:mq-mcp"
         envelope.address.mailbox = mailbox
-        if self._mq_uuid:
-            envelope.address.uuid = self._mq_uuid
-            log.debug("Routing to uuid=%s mailbox=%s", self._mq_uuid, mailbox)
-        elif self._mq_pid:
-            # Fallback only — pid-based routing causes AmbiguousRecipient in C&R mode
-            envelope.address.process.pid = self._mq_pid
-            log.warning("UUID unknown, falling back to pid=%d — routing may fail", self._mq_pid)
-        else:
-            log.warning("MQ identity unknown — message may not route to Lua actor")
-        envelope.return_address.name    = self._actor_name
-        envelope.return_address.mailbox = self._actor_mailbox
+        envelope.address.uuid    = client["uuid"]
+        log.debug("Routing to character=%r uuid=%s mailbox=%s",
+                  client["character"], client["uuid"], mailbox)
+        envelope.return_address.name        = self._actor_name
+        envelope.return_address.mailbox     = self._actor_mailbox
         envelope.return_address.process.pid = os.getpid()
         envelope.mode     = _Mode.CALL_AND_RESPONSE
         envelope.sequence = seq
@@ -376,12 +405,7 @@ class MQActorClient:
             return -1
 
     def _handle_identification(self, payload: bytes):
-        """Parse Identification messages from MQ to learn the EQ process PID.
-
-        MSG_IDENTIFICATION payloads are raw Identification protos (not AddIdentity).
-        We want the one with a Client address (account/server/character) — that is
-        the active EQ game process hosting the Lua runtime.
-        """
+        """Parse Identification messages from MQ to track all connected EQ clients."""
         if not payload:
             return
         try:
@@ -390,14 +414,22 @@ class MQActorClient:
             pid = ident.process.pid
             if not pid or pid == os.getpid():
                 return
-            # Prefer the EQ client process (has account/server/character)
+            uid        = ident.uuid or ""
             has_client = ident.HasField('client')
-            uid = ident.uuid or ""
-            log.info("Identity: pid=%d uuid=%r name=%r has_client=%s", pid, uid, ident.name, has_client)
-            if has_client or self._mq_pid is None:
-                self._mq_pid  = pid
-                self._mq_uuid = uid or None
-                log.info("Using MQ PID=%d UUID=%r", pid, self._mq_uuid)
+            log.info("Identity: pid=%d uuid=%r name=%r has_client=%s",
+                     pid, uid, ident.name, has_client)
+            if has_client and uid:
+                entry = {
+                    "uuid":      uid,
+                    "pid":       pid,
+                    "account":   ident.client.account,
+                    "server":    ident.client.server,
+                    "character": ident.client.character,
+                }
+                with self._clients_lock:
+                    self._mq_clients[uid] = entry
+                log.info("EQ client: character=%r server=%r uuid=%r",
+                         ident.client.character, ident.client.server, uid)
         except Exception as e:
             log.debug("Could not parse identification: %s", e)
 

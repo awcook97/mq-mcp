@@ -38,7 +38,18 @@ async def get_config() -> dict:
         "mq_definitions_path":  str(defs_path) if defs_path else None,
         "mq_definitions_ready": defs_path is not None,
         "mq_connected":         actor.is_connected(),
+        "connected_characters": [c["character"] for c in actor.list_clients()],
     }
+
+
+@mcp.tool()
+async def list_characters() -> list[dict]:
+    """List all EQ characters currently connected to MacroQuest.
+
+    Returns account, server, and character name for each connected client.
+    Each character must have mq-mcp.lua running for mq_eval to work on them.
+    """
+    return actor.list_clients()
 
 
 @mcp.tool()
@@ -118,7 +129,7 @@ async def write_script(name: str, content: str) -> str:
 # ------------------------------------------------------------------
 
 @mcp.tool()
-async def mq_eval(code: str) -> dict:
+async def mq_eval(code: str, character: str = "") -> dict:
     """Execute Lua code in the MacroQuest environment and return the result.
 
     The code runs inside the in-game Lua runtime with full access to mq.TLO,
@@ -136,35 +147,45 @@ async def mq_eval(code: str) -> dict:
         mq.cmd('/echo hello from claude')
 
     Args:
-        code: Lua code to execute. Single expressions or full statement blocks.
+        code:      Lua code to execute. Single expressions or full statement blocks.
+        character: Character name to target. Omit to use the first connected character.
     """
-    return await actor.call(cfg.lua_mailbox, {"type": "eval", "code": code}, timeout=cfg.rpc_timeout)
+    return await actor.call(cfg.lua_mailbox, {"type": "eval", "code": code},
+                            timeout=cfg.rpc_timeout, character=character)
 
 
 @mcp.tool()
-async def get_tlo_reference() -> dict:
+async def get_tlo_reference(character: str = "") -> dict:
     """Get the full TLO type reference — all types, members, and inheritance.
 
     Combines runtime introspection from MQ with mq-definitions documentation.
     Results are cached in MQ until refresh_tlo_types() is called.
+
+    Args:
+        character: Character to introspect from. Omit to use the first connected character.
     """
     return await actor.call(
         cfg.lua_mailbox,
         {"type": "get_tlo_types", "max_scan": cfg.max_member_scan},
-        timeout=60.0,  # type introspection can take a moment
+        timeout=60.0,
+        character=character,
     )
 
 
 @mcp.tool()
-async def refresh_tlo_types() -> str:
+async def refresh_tlo_types(character: str = "") -> str:
     """Force MQ to re-run TLO type introspection.
 
     Useful after loading or unloading plugins that register new types.
+
+    Args:
+        character: Character to refresh on. Omit to use the first connected character.
     """
     result = await actor.call(
         cfg.lua_mailbox,
         {"type": "refresh_tlo_types", "max_scan": cfg.max_member_scan},
         timeout=60.0,
+        character=character,
     )
     return result.get("status", "done")
 
