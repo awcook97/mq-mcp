@@ -8,7 +8,7 @@ _DEFAULTS = {
     "pipe_name": r"\\.\pipe\mqpipe",
     "actor_name": "mcp-server",
     "actor_mailbox": "scripting-assistant",
-    "lua_mailbox": "mq-mcp",
+    "lua_mailbox": "lua:mq-mcp:mq-mcp",
     "max_member_scan": 2000,
     "rpc_timeout": 10.0,
 }

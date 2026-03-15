@@ -68,8 +68,9 @@ mailbox: "scripting-assistant"
 
 **Lua Actor address**:
 ```
-mailbox: "mq-mcp"
+mailbox: "lua:mq-mcp:mq-mcp"
 ```
+Format: `lua:<script_name>:<mailbox_name>` — the `lua:` prefix is added by the MQ2Lua plugin when registering with the PostOffice.
 
 ### RPC Message Types
 
@@ -163,7 +164,9 @@ If `null`, falls back to bundled copy at `./mq-definitions/`.
   "pipe_name": "\\\\.\\pipe\\mqpipe",
   "actor_name": "mcp-server",
   "actor_mailbox": "scripting-assistant",
-  "max_member_scan": 2000
+  "lua_mailbox": "lua:mq-mcp:mq-mcp",
+  "max_member_scan": 2000,
+  "rpc_timeout": 10.0
 }
 ```
 
@@ -266,6 +269,6 @@ mq-mcp/
 ## Open Questions
 
 - [ ] Locate MQ protobuf `.proto` schema files in the MQ source repo
-- [ ] Confirm exact Actor address format Python must use to register
+- [x] Confirm exact Actor address format Python must use to register — `lua:<script>:<mailbox>` e.g. `lua:mq-mcp:mq-mcp`
 - [ ] Determine if `mq.GetDataTypeNames()` includes plugin-registered types or only core types
 - [ ] Decide whether `write_script` should go through Actor RPC (Lua writes) or direct filesystem (Python writes)

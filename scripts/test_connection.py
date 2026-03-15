@@ -10,8 +10,11 @@ What this tests:
 """
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s %(message)s")
 
 # allow running from repo root or scripts/
 sys.path.insert(0, str(Path(__file__).parent.parent))

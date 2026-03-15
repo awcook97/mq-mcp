@@ -5,10 +5,19 @@
 --- Registers the mailbox 'mq-mcp' and handles RPC requests from the
 --- Python MCP server. Responds with JSON-encoded game state.
 
-local mq         = require('mq')
-local actors     = require('actors')
-local PackageMan = require('mq/PackageMan')
-local json       = PackageMan.Require('lua-cjson', 'cjson')
+local mq     = require('mq')
+local actors = require('actors')
+
+-- lua-cjson is only used as a fallback for string payloads; load it optionally
+-- so a missing package doesn't prevent the mailbox from registering.
+local json
+do
+    local ok, result = pcall(function()
+        local PackageMan = require('mq/PackageMan')
+        return PackageMan.Require('lua-cjson', 'cjson')
+    end)
+    if ok then json = result else print('[mq-mcp] Warning: lua-cjson unavailable: ' .. tostring(result)) end
+end
 
 local MAILBOX = 'mq-mcp'
 
@@ -177,13 +186,25 @@ end
 -- The handler below uses message:send() — update if the API differs.
 
 local function on_message(message)
-    local ok, request = pcall(json.decode, message.content)
-    if not ok then
-        message:send(json.encode({ error = 'Invalid JSON in request' }))
+    -- message.content is already a Lua table (deserialized from Variant proto by the MQ actor system)
+    local content = message.content
+    log(string.format('Received message, content type: %s', type(content)))
+
+    local request
+    if type(content) == 'table' then
+        request = content
+    elseif type(content) == 'string' and json then
+        -- Fallback: bare JSON string payload
+        local ok, decoded = pcall(json.decode, content)
+        if ok then request = decoded end
+    end
+
+    if type(request) ~= 'table' then
+        message:reply(1, { error = 'Expected table request, got ' .. type(content) })
         return
     end
 
-    local msg_type = request and request.type
+    local msg_type = request.type
     local handler  = msg_type and handlers[msg_type]
 
     local response
@@ -199,7 +220,8 @@ local function on_message(message)
         response = { error = string.format('Unknown request type: %s', tostring(msg_type)) }
     end
 
-    message:send(json.encode(response))
+    -- Reply with a Lua table; the MQ actor system serializes it back as a Variant proto
+    message:reply(0, response)
 end
 
 -- ------------------------------------------------------------------
@@ -208,6 +230,19 @@ end
 
 actors.register(MAILBOX, on_message)
 log(string.format("Registered Actor mailbox '%s'", MAILBOX))
+
+-- Announce ourselves to the Python MCP server so it can confirm Lua→Python routing.
+-- Also logs the full mailbox name as MQ sees it for debugging.
+mq.delay(500)   -- give pipe time to settle
+local ok, err = pcall(function()
+    actors.send({ name = 'mcp-server', absolute_mailbox = true }, {type='announce', mailbox=MAILBOX})
+end)
+if ok then
+    log("Sent announce to mcp-server")
+else
+    log(string.format("announce failed: %s", tostring(err)))
+end
+
 log("Ready. Waiting for requests from mcp-server.")
 
 -- Keep the script alive

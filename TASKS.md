@@ -117,6 +117,6 @@ Merge runtime type map (ground truth) with mq-definitions (descriptions/signatur
 ## Open Questions (resolve before or during Phase 1)
 
 - [ ] Confirm `.proto` file locations in MQ source repo
-- [ ] Confirm exact Actor address registration format for external (non-MQ) process
+- [x] Confirm exact Actor address registration format for external (non-MQ) process — `lua:<script>:<mailbox>`
 - [ ] Confirm `mq.GetDataTypeNames()` includes plugin-registered types
 - [ ] Decide: `write_script` via filesystem (Python) or Actor RPC (Lua) — filesystem is simpler
