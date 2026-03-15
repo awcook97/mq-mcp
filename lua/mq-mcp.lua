@@ -7,7 +7,15 @@
 
 local mq      = require('mq')
 local actors  = require('actors')
-local json    = require('mq/json')
+
+-- cjson is installed via MQ's luarocks; dkjson as fallback
+local ok, json = pcall(require, 'cjson')
+if not ok then
+    ok, json = pcall(require, 'dkjson')
+    if not ok then
+        error('No JSON library found. Expected cjson or dkjson.')
+    end
+end
 
 local MAILBOX = 'mq-mcp'
 
