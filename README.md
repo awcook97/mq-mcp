@@ -118,7 +118,6 @@ mq.cmd('/sit')
 
 -- Do something then read the result
 mq.cmd('/target npc')
-mq.delay(500)
 return { name=mq.TLO.Target.Name(), distance=mq.TLO.Target.Distance() }
 
 -- Iterate over spell gems
