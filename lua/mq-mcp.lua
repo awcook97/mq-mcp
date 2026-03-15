@@ -7,6 +7,10 @@ local actors = require('actors')
 
 local MAILBOX = 'mq-mcp'
 
+-- Environment for eval'd code: exposes mq/actors locals plus all globals.
+-- Built lazily so it's available after all requires are done.
+local _eval_env = setmetatable({ mq = mq, actors = actors }, { __index = _G })
+
 -- Cache for TLO type introspection — expensive to rebuild
 local _tlo_cache = nil
 
@@ -72,12 +76,13 @@ handlers['eval'] = function(req)
         return { error = 'Compile error: ' .. tostring(err) }
     end
 
-    local results = table.pack(pcall(fn))
+    setfenv(fn, _eval_env)
+    local results = { pcall(fn) }
     if not results[1] then
         return { error = 'Runtime error: ' .. tostring(results[2]) }
     end
 
-    local n = results.n - 1  -- number of return values (subtract the ok bool)
+    local n = #results - 1  -- number of return values (subtract the ok bool)
     if n == 0 then
         return { result = nil }
     elseif n == 1 then
@@ -85,7 +90,7 @@ handlers['eval'] = function(req)
     else
         -- Multiple return values → array
         local arr = {}
-        for i = 2, results.n do
+        for i = 2, #results do
             table.insert(arr, to_serializable(results[i]))
         end
         return { result = arr }
