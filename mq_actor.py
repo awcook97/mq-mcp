@@ -176,6 +176,11 @@ class MQActorClient:
         self._mq_clients: dict[str, dict] = {}
         self._clients_lock = threading.Lock()
 
+        # Optional callback for unsolicited incoming messages (e.g. tlo_complete announces).
+        # Called on the asyncio event loop: handler(message: dict, from_uuid: str)
+        self._incoming_handler = None
+        self._incoming_loop    = None
+
         self._seq      = 0
         self._seq_lock = threading.Lock()
 
@@ -235,6 +240,35 @@ class MQActorClient:
     # ------------------------------------------------------------------
     # RPC
     # ------------------------------------------------------------------
+
+    def set_message_handler(self, handler, loop: asyncio.AbstractEventLoop):
+        """Register a callback for unsolicited incoming messages.
+
+        handler(message: dict, from_uuid: str) is called on the asyncio event loop.
+        Used to receive push notifications from Lua (e.g. tlo_complete announces).
+        """
+        self._incoming_handler = handler
+        self._incoming_loop    = loop
+
+    def send(self, mailbox: str, message: dict, character: str = ""):
+        """Send a fire-and-forget SimpleMessage to a Lua Actor mailbox."""
+        if not self.is_connected():
+            raise MQNotConnectedError("Not connected to MQ pipe")
+        client = self.get_client(character)
+        if not client:
+            raise MQNotConnectedError(
+                f"No EQ client found{f' for character {character!r}' if character else ''}"
+            )
+        envelope = Routing_pb2.Envelope()
+        envelope.address.mailbox        = mailbox
+        envelope.address.uuid           = client["uuid"]
+        envelope.return_address.name        = self._actor_name
+        envelope.return_address.mailbox     = self._actor_mailbox
+        envelope.return_address.process.pid = os.getpid()
+        envelope.mode     = _Mode.SIMPLE
+        envelope.sequence = self._next_seq()
+        envelope.payload  = _dict_to_variant(message).SerializeToString()
+        self._send_raw(_MsgId.ROUTE, _Mode.SIMPLE, envelope.sequence, envelope.SerializeToString())
 
     def list_clients(self) -> list[dict]:
         """Return all currently known EQ clients."""
@@ -447,15 +481,31 @@ class MQActorClient:
                 pass
 
     def _handle_incoming_route(self, hdr: dict, payload: bytes):
-        """Log unsolicited incoming ROUTE messages (e.g. Lua→Python announces)."""
+        """Handle unsolicited incoming ROUTE messages (e.g. Lua→Python announces)."""
         try:
             envelope = Routing_pb2.Envelope()
             envelope.ParseFromString(payload)
             ra = envelope.return_address
-            log.info("Incoming ROUTE: from_name=%r from_mailbox=%r payload=%r",
-                     ra.name,
-                     ra.mailbox,
-                     envelope.payload[:200] if envelope.HasField("payload") else b"")
+
+            # Resolve sender UUID from return_address
+            from_uuid = ra.uuid or ""
+            if not from_uuid and ra.HasField("client"):
+                with self._clients_lock:
+                    for uid, c in self._mq_clients.items():
+                        if c["character"].lower() == ra.client.character.lower():
+                            from_uuid = uid
+                            break
+
+            log.info("Incoming ROUTE: from_name=%r from_uuid=%r", ra.name, from_uuid)
+
+            if envelope.payload and self._incoming_handler and self._incoming_loop:
+                try:
+                    msg = _variant_to_dict(Actor_pb2.Variant.FromString(envelope.payload))
+                    self._incoming_loop.call_soon_threadsafe(
+                        self._incoming_handler, msg, from_uuid
+                    )
+                except Exception as e:
+                    log.warning("Failed to parse incoming message payload: %s", e)
         except Exception as e:
             log.warning("Failed to parse incoming route: %s", e)
 

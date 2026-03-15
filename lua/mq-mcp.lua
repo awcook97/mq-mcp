@@ -11,8 +11,10 @@ local MAILBOX = 'mq-mcp'
 -- Built lazily so it's available after all requires are done.
 local _eval_env = setmetatable({ mq = mq, actors = actors }, { __index = _G })
 
--- Cache for TLO type introspection — expensive to rebuild
-local _tlo_cache = nil
+-- TLO introspection state — scan runs in the main loop, never in a callback
+local _tlo_cache   = nil
+local _scan_pending = false
+local _scan_force   = false
 
 local function log(msg)
     print(string.format('[mq-mcp] %s', msg))
@@ -111,11 +113,19 @@ local function build_tlo_types(max_scan)
         local t = mq.TLO.Type(type_name)
         if t() then
             local members = {}
+            local empty_run = 0
             for i = 1, max_scan do
                 local member_name = t.Member(i)()
                 if member_name and member_name ~= '' then
                     table.insert(members, member_name)
+                    empty_run = 0
+                else
+                    empty_run = empty_run + 1
+                    -- Member IDs are sparse but not infinite — stop after 50 consecutive
+                    -- empty slots to avoid scanning needlessly to max_scan every time
+                    if empty_run >= 50 then break end
                 end
+                mq.delay()  -- yield each iteration so the game loop stays responsive
             end
             local parent = t.InheritedType and t.InheritedType() or nil
             types[type_name] = {
@@ -123,23 +133,19 @@ local function build_tlo_types(max_scan)
                 inherits = (parent and parent ~= '') and parent or nil,
             }
         end
-        mq.delay()  -- yield between types so the game loop stays responsive
+        mq.delay()
     end
 
     log(string.format('TLO type map built: %d types', #type_names))
     return types
 end
 
-handlers['get_tlo_types'] = function(req)
-    if not _tlo_cache then
-        _tlo_cache = build_tlo_types(req.max_scan)
-    end
-    return { types = _tlo_cache }
-end
-
-handlers['refresh_tlo_types'] = function(req)
-    _tlo_cache = build_tlo_types(req.max_scan)
-    return { status = 'ok' }
+-- start_tlo_scan: fire-and-forget — sets a flag and returns immediately.
+-- The scan runs in the main loop and the result is announced back to mcp-server.
+handlers['start_tlo_scan'] = function(req)
+    _scan_force   = req.force or false
+    _scan_pending = true
+    return nil  -- no RPC reply; result arrives via tlo_complete announce
 end
 
 -- ------------------------------------------------------------------
@@ -199,5 +205,25 @@ end
 log("Ready. Waiting for requests from mcp-server.")
 
 while true do
+    if _scan_pending then
+        _scan_pending = false
+        if _scan_force then
+            _tlo_cache = nil
+            _scan_force = false
+        end
+        local types = build_tlo_types()
+        _tlo_cache = types
+        local ok, err = pcall(function()
+            actors.send(
+                { name = 'mcp-server', absolute_mailbox = true },
+                { type = 'tlo_complete', types = types }
+            )
+        end)
+        if ok then
+            log('TLO scan complete, announced to mcp-server')
+        else
+            log('TLO scan complete but announce failed: ' .. tostring(err))
+        end
+    end
     mq.delay(1000)
 end

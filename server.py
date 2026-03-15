@@ -19,6 +19,22 @@ mcp    = FastMCP("mq-mcp")
 # TLO cache keyed by character UUID — populated at startup and on demand.
 _tlo_cache: dict[str, dict] = {}
 
+# One asyncio.Event per UUID — set when tlo_complete announce arrives.
+_tlo_scan_events: dict[str, asyncio.Event] = {}
+
+
+def _on_incoming_message(msg: dict, from_uuid: str):
+    """Handle push messages from Lua (called on the asyncio event loop)."""
+    if not isinstance(msg, dict):
+        return
+    if msg.get("type") == "tlo_complete":
+        _tlo_cache[from_uuid] = {"types": msg.get("types")}
+        log.info("TLO scan complete from uuid=%r (%d types)",
+                 from_uuid, len((msg.get("types") or {})))
+        ev = _tlo_scan_events.get(from_uuid)
+        if ev:
+            ev.set()
+
 
 # ------------------------------------------------------------------
 # Setup / config tools
@@ -159,29 +175,36 @@ async def mq_eval(code: str, character: str = "") -> dict:
                             timeout=cfg.rpc_timeout, character=character)
 
 
-async def _build_tlo_cache(character: str = "") -> dict:
-    """Fetch TLO types via RPC, cache by UUID, and return the result."""
+async def _request_tlo_scan(character: str = "", force: bool = False):
+    """Send a start_tlo_scan SimpleMessage and wait for the tlo_complete announce."""
     client = actor.get_client(character)
-    result = await actor.call(
-        cfg.lua_mailbox,
-        {"type": "get_tlo_types", "max_scan": cfg.max_member_scan},
-        timeout=60.0,
-        character=character,
-    )
-    if client:
-        _tlo_cache[client["uuid"]] = result
-        log.info("TLO cache built for %s (%d types)",
-                 client["character"], len(result.get("types") or {}))
-    return result
+    if not client:
+        raise MQNotConnectedError("No EQ client connected")
+    uuid = client["uuid"]
+
+    # If a scan is already in progress, just wait on the existing event.
+    if uuid not in _tlo_scan_events:
+        _tlo_scan_events[uuid] = asyncio.Event()
+        actor.send(cfg.lua_mailbox,
+                   {"type": "start_tlo_scan", "max_scan": cfg.max_member_scan, "force": force},
+                   character=character)
+
+    try:
+        await asyncio.wait_for(_tlo_scan_events[uuid].wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        _tlo_scan_events.pop(uuid, None)
+        raise RuntimeError(f"TLO scan timed out for {client['character']}")
+    finally:
+        _tlo_scan_events.pop(uuid, None)
 
 
 async def _warm_tlo_cache():
-    """Background task: build TLO cache for all connected characters at startup."""
+    """Background task: trigger TLO scan for all connected characters at startup."""
     await asyncio.sleep(3)   # let MQ identity responses settle
     for client in actor.list_clients():
-        if client["uuid"] not in _tlo_cache:
+        if client["uuid"] not in _tlo_cache and client["uuid"] not in _tlo_scan_events:
             try:
-                await _build_tlo_cache(client["character"])
+                await _request_tlo_scan(client["character"])
             except Exception as e:
                 log.warning("TLO warm-up failed for %s: %s", client["character"], e)
 
@@ -200,7 +223,8 @@ async def get_tlo_reference(character: str = "") -> dict:
     client = actor.get_client(character)
     if client and client["uuid"] in _tlo_cache:
         return _tlo_cache[client["uuid"]]
-    return await _build_tlo_cache(character)
+    await _request_tlo_scan(character)
+    return _tlo_cache.get(client["uuid"] if client else "", {})
 
 
 @mcp.tool()
@@ -216,14 +240,8 @@ async def refresh_tlo_types(character: str = "") -> str:
     client = actor.get_client(character)
     if client:
         _tlo_cache.pop(client["uuid"], None)
-    # Tell Lua to invalidate its cache too, then rebuild
-    await actor.call(
-        cfg.lua_mailbox,
-        {"type": "refresh_tlo_types", "max_scan": cfg.max_member_scan},
-        timeout=60.0,
-        character=character,
-    )
-    await _build_tlo_cache(character)
+        _tlo_scan_events.pop(client["uuid"], None)
+    await _request_tlo_scan(character, force=True)
     return "ok"
 
 
@@ -239,6 +257,7 @@ def main():
         log.warning("Could not connect to MQ pipe: %s — game state tools will fail until MQ is running", e)
 
     async def _run():
+        actor.set_message_handler(_on_incoming_message, asyncio.get_running_loop())
         asyncio.create_task(_warm_tlo_cache())
         await mcp.run_stdio_async()
 
