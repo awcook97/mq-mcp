@@ -56,39 +56,31 @@ async def write_script(name: str, content: str) -> str:
 
 
 # ------------------------------------------------------------------
-# Game state tools (via Actor RPC)
+# Game state / execution tool (via Actor RPC)
 # ------------------------------------------------------------------
 
 @mcp.tool()
-async def get_character(character_name: str = "") -> dict:
-    """Get character info from MQ — name, class, level, spell gems.
+async def mq_eval(code: str) -> dict:
+    """Execute Lua code in the MacroQuest environment and return the result.
+
+    The code runs inside the in-game Lua runtime with full access to mq.TLO,
+    mq.cmd(), and all loaded plugins. Use 'return' to get a value back.
+
+    Single expressions work without 'return':
+        mq.TLO.Me.Name()
+        mq.TLO.Me.Level()
+        mq.TLO.Target.Distance()
+
+    Use 'return' for explicit results or multi-line code:
+        return { name=mq.TLO.Me.Name(), level=mq.TLO.Me.Level() }
+
+    Run a command (no return value needed):
+        mq.cmd('/echo hello from claude')
 
     Args:
-        character_name: Specific character to query. Omit for the active character.
+        code: Lua code to execute. Single expressions or full statement blocks.
     """
-    msg = {"type": "get_character"}
-    if character_name:
-        msg["character"] = character_name
-    return await actor.call(cfg.lua_mailbox, msg, timeout=cfg.rpc_timeout)
-
-
-@mcp.tool()
-async def get_spell_book(character_name: str = "") -> dict:
-    """Get the full spell book for a character.
-
-    Args:
-        character_name: Specific character to query. Omit for the active character.
-    """
-    msg = {"type": "get_spell_book"}
-    if character_name:
-        msg["character"] = character_name
-    return await actor.call(cfg.lua_mailbox, msg, timeout=cfg.rpc_timeout)
-
-
-@mcp.tool()
-async def get_plugins() -> dict:
-    """Get the list of currently loaded MQ plugins."""
-    return await actor.call(cfg.lua_mailbox, {"type": "get_plugins"}, timeout=cfg.rpc_timeout)
+    return await actor.call(cfg.lua_mailbox, {"type": "eval", "code": code}, timeout=cfg.rpc_timeout)
 
 
 @mcp.tool()

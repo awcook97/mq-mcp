@@ -1,23 +1,9 @@
 --- mq-mcp.lua
 --- MacroQuest Actor mailbox for the MQ MCP scripting assistant.
 --- Run with: /lua run mq-mcp
----
---- Registers the mailbox 'mq-mcp' and handles RPC requests from the
---- Python MCP server. Responds with JSON-encoded game state.
 
 local mq     = require('mq')
 local actors = require('actors')
-
--- lua-cjson is only used as a fallback for string payloads; load it optionally
--- so a missing package doesn't prevent the mailbox from registering.
-local json
-do
-    local ok, result = pcall(function()
-        local PackageMan = require('mq/PackageMan')
-        return PackageMan.Require('lua-cjson', 'cjson')
-    end)
-    if ok then json = result else print('[mq-mcp] Warning: lua-cjson unavailable: ' .. tostring(result)) end
-end
 
 local MAILBOX = 'mq-mcp'
 
@@ -29,54 +15,85 @@ local function log(msg)
 end
 
 -- ------------------------------------------------------------------
+-- Serialization helper
+-- Recursively converts Lua values to plain tables/scalars safe for
+-- the MQ Variant proto. MQ TLO userdata objects are called () to
+-- extract their value.
+-- ------------------------------------------------------------------
+
+local function to_serializable(v, _depth)
+    _depth = _depth or 0
+    if _depth > 20 then return '<max depth>' end
+    local t = type(v)
+    if t == 'nil'     then return nil
+    elseif t == 'boolean' then return v
+    elseif t == 'number'  then return v
+    elseif t == 'string'  then return v
+    elseif t == 'table'   then
+        local out = {}
+        for k, val in pairs(v) do
+            out[tostring(k)] = to_serializable(val, _depth + 1)
+        end
+        return out
+    elseif t == 'userdata' then
+        -- MQ TLO type — call () to unwrap to a plain value
+        local ok, val = pcall(function() return v() end)
+        if ok then return to_serializable(val, _depth + 1) end
+        return tostring(v)
+    else
+        return tostring(v)
+    end
+end
+
+-- ------------------------------------------------------------------
 -- Request handlers
 -- ------------------------------------------------------------------
 
 local handlers = {}
 
-handlers['get_character'] = function(_req)
-    local gems = {}
-    for i = 1, 13 do
-        local spell = mq.TLO.Me.Gem(i)
-        if spell() then
-            gems[tostring(i)] = spell.Name()
+-- eval: execute arbitrary Lua code in the MQ environment.
+-- Tries to compile as an expression (implicit return) first;
+-- falls back to a statement block so both forms work:
+--   "mq.TLO.Me.Name()"
+--   "local t = {} for i=1,3 do t[i]=i end return t"
+handlers['eval'] = function(req)
+    local code = req.code
+    if type(code) ~= 'string' or code == '' then
+        return { error = 'Missing or empty code parameter' }
+    end
+
+    -- Try expression form first
+    local fn, err = load('return ' .. code)
+    if not fn then
+        -- Try statement block
+        fn, err = load(code)
+    end
+    if not fn then
+        return { error = 'Compile error: ' .. tostring(err) }
+    end
+
+    local results = table.pack(pcall(fn))
+    if not results[1] then
+        return { error = 'Runtime error: ' .. tostring(results[2]) }
+    end
+
+    local n = results.n - 1  -- number of return values (subtract the ok bool)
+    if n == 0 then
+        return { result = nil }
+    elseif n == 1 then
+        return { result = to_serializable(results[2]) }
+    else
+        -- Multiple return values → array
+        local arr = {}
+        for i = 2, results.n do
+            table.insert(arr, to_serializable(results[i]))
         end
+        return { result = arr }
     end
-    return {
-        name  = mq.TLO.Me.Name(),
-        class = mq.TLO.Me.Class.Name(),
-        level = mq.TLO.Me.Level(),
-        gems  = gems,
-    }
 end
 
-handlers['get_spell_book'] = function(_req)
-    local spells = {}
-    local i = 1
-    while true do
-        local spell = mq.TLO.Me.Book(i)
-        if not spell() then break end
-        table.insert(spells, {
-            id    = spell.ID(),
-            name  = spell.Name(),
-            level = spell.Level(),
-        })
-        i = i + 1
-    end
-    return { spells = spells }
-end
-
-handlers['get_plugins'] = function(_req)
-    local plugins = {}
-    local i = 1
-    while true do
-        local plugin = mq.TLO.Plugin(i)
-        if not plugin() then break end
-        table.insert(plugins, plugin.Name())
-        i = i + 1
-    end
-    return { plugins = plugins }
-end
+-- get_tlo_types / refresh_tlo_types: kept as dedicated handlers because
+-- they involve a long scan loop and maintain a cache.
 
 local function build_tlo_types(max_scan)
     max_scan = max_scan or 2000
@@ -89,15 +106,12 @@ local function build_tlo_types(max_scan)
         local t = mq.TLO.Type(type_name)
         if t() then
             local members = {}
-            -- Member IDs are non-contiguous, so we scan the full range
             for i = 1, max_scan do
                 local member_name = t.Member(i)()
                 if member_name and member_name ~= '' then
                     table.insert(members, member_name)
                 end
             end
-
-            -- TODO: verify InheritedType API — may be .InheritedType() or .BaseType()
             local parent = t.InheritedType and t.InheritedType() or nil
             types[type_name] = {
                 members  = members,
@@ -122,81 +136,17 @@ handlers['refresh_tlo_types'] = function(req)
     return { status = 'ok' }
 end
 
-handlers['list_scripts'] = function(_req)
-    -- mq.TLO.MacroQuest.Path('lua') returns the MQ lua directory
-    local lua_path = mq.TLO.MacroQuest.Path('lua')()
-    if not lua_path then
-        return { error = 'Could not determine lua path' }
-    end
-
-    -- Use io.popen with dir to list .lua files recursively
-    -- TODO: verify this works in MQ's Lua environment; lfs would be cleaner if available
-    local files = {}
-    local cmd   = string.format('dir /b /s "%s\\*.lua" 2>nul', lua_path)
-    local pipe  = io.popen(cmd)
-    if pipe then
-        for line in pipe:lines() do
-            -- Return paths relative to lua_path
-            local rel = line:gsub(lua_path:gsub('\\', '\\\\') .. '\\', '')
-            table.insert(files, rel)
-        end
-        pipe:close()
-    end
-    return { files = files }
-end
-
-handlers['read_script'] = function(req)
-    local lua_path = mq.TLO.MacroQuest.Path('lua')()
-    if not lua_path then
-        return { error = 'Could not determine lua path' }
-    end
-    local path = lua_path .. '\\' .. req.name
-    local f    = io.open(path, 'r')
-    if not f then
-        return { error = string.format('File not found: %s', req.name) }
-    end
-    local content = f:read('*a')
-    f:close()
-    return { content = content }
-end
-
-handlers['write_script'] = function(req)
-    local lua_path = mq.TLO.MacroQuest.Path('lua')()
-    if not lua_path then
-        return { error = 'Could not determine lua path' }
-    end
-    local path = lua_path .. '\\' .. req.name
-    local f    = io.open(path, 'w')
-    if not f then
-        return { error = string.format('Could not open for writing: %s', req.name) }
-    end
-    f:write(req.content)
-    f:close()
-    return { success = true, path = path }
-end
-
 -- ------------------------------------------------------------------
 -- Actor message dispatch
 -- ------------------------------------------------------------------
 
--- TODO: verify the exact MQ actors reply API.
--- Candidates based on MQ source/docs:
---   message:send(content)        -- reply to sender
---   actors.send(message.address, content)
--- The handler below uses message:send() — update if the API differs.
-
 local function on_message(message)
-    -- message.content is already a Lua table (deserialized from Variant proto by the MQ actor system)
     local content = message.content
     log(string.format('Received message, content type: %s', type(content)))
 
     local request
     if type(content) == 'table' then
         request = content
-    elseif type(content) == 'string' and json then
-        -- Fallback: bare JSON string payload
-        local ok, decoded = pcall(json.decode, content)
-        if ok then request = decoded end
     end
 
     if type(request) ~= 'table' then
@@ -209,8 +159,8 @@ local function on_message(message)
 
     local response
     if handler then
-        local ok2, result = pcall(handler, request)
-        if ok2 then
+        local ok, result = pcall(handler, request)
+        if ok then
             response = result
         else
             response = { error = tostring(result) }
@@ -220,7 +170,6 @@ local function on_message(message)
         response = { error = string.format('Unknown request type: %s', tostring(msg_type)) }
     end
 
-    -- Reply with a Lua table; the MQ actor system serializes it back as a Variant proto
     message:reply(0, response)
 end
 
@@ -231,11 +180,9 @@ end
 actors.register(MAILBOX, on_message)
 log(string.format("Registered Actor mailbox '%s'", MAILBOX))
 
--- Announce ourselves to the Python MCP server so it can confirm Lua→Python routing.
--- Also logs the full mailbox name as MQ sees it for debugging.
-mq.delay(500)   -- give pipe time to settle
+mq.delay(500)
 local ok, err = pcall(function()
-    actors.send({ name = 'mcp-server', absolute_mailbox = true }, {type='announce', mailbox=MAILBOX})
+    actors.send({ name = 'mcp-server', absolute_mailbox = true }, { type = 'announce', mailbox = MAILBOX })
 end)
 if ok then
     log("Sent announce to mcp-server")
@@ -245,7 +192,6 @@ end
 
 log("Ready. Waiting for requests from mcp-server.")
 
--- Keep the script alive
 while true do
     mq.delay(1000)
 end

@@ -109,11 +109,32 @@ The server connects to MQ automatically on startup. If MQ isn't running, the scr
 
 | Tool | Description |
 |---|---|
-| `get_character` | Name, class, level, and spell gems for the active character |
-| `get_spell_book` | Full list of known spells with IDs and levels |
-| `get_plugins` | Currently loaded MQ plugins |
+| `mq_eval(code)` | Execute any Lua code in the MQ environment and return the result |
 | `get_tlo_reference` | Full runtime TLO type map enriched with mq-definitions docs |
 | `refresh_tlo_types` | Re-run TLO introspection (use after loading/unloading plugins) |
 | `list_scripts` | List all `.lua` files in your MQ lua directory |
 | `read_script` | Read a Lua script by name |
 | `write_script` | Write a Lua script directly to your MQ lua directory |
+
+### mq_eval examples
+
+```lua
+-- Query any TLO value
+mq.TLO.Me.Name()
+mq.TLO.Me.Level()
+mq.TLO.Target.Distance()
+
+-- Build a table of results
+return { name=mq.TLO.Me.Name(), class=mq.TLO.Me.Class.Name(), level=mq.TLO.Me.Level() }
+
+-- Run a command
+mq.cmd('/echo hello from claude')
+
+-- More complex queries
+local gems = {}
+for i = 1, 13 do
+    local s = mq.TLO.Me.Gem(i)()
+    if s then gems[i] = s end
+end
+return gems
+```
