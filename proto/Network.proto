@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+import "Routing.proto";
+
+package mq.peerpnetwork;
+
+enum MessageType {
+	Route = 0;
+	Leader = 1;
+	Handshake = 2;
+	Response = 3;
+}
+
+message Identity {
+	string uuid = 1;
+	uint32 port = 2;
+}
+
+message Header {
+	MessageType type = 1;
+	uint32 length = 2;
+
+	optional string address = 11;
+	optional uint32 port = 12;
+}
+
+message NetworkMessage {
+	oneof contents {
+		mq.proto.routing.AddIdentity add = 1;
+		mq.proto.routing.DropIdentity drop = 2;
+		mq.proto.routing.RequestIdentities request = 3;
+
+		bytes routed = 10;
+	}
+}
+
+message Announce {
+	string address = 1;
+	uint32 port = 2;
+}

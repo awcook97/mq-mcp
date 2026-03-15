@@ -1,0 +1,10 @@
+{
+    "mq_lua_path": "C:\\Users\\you\\AppData\\Local\\YourServer\\Emu\\Release\\lua",
+    "mq_definitions_path": null,
+    "pipe_name": "\\\\.\\pipe\\mqpipe",
+    "actor_name": "mcp-server",
+    "actor_mailbox": "scripting-assistant",
+    "lua_mailbox": "mq-mcp",
+    "max_member_scan": 2000,
+    "rpc_timeout": 10.0
+}
