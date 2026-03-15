@@ -1,10 +1,6 @@
 # mq-mcp
 
-An MCP (Model Context Protocol) server that connects Claude to a running MacroQuest instance for Lua scripting assistance.
-
-## What it does
-
-Gives Claude accurate context about your game state so it can write MQ Lua scripts that actually work:
+An MCP (Model Context Protocol) server that connects Claude to a running MacroQuest instance for Lua scripting assistance. Gives Claude accurate context about your game state so it can write MQ Lua scripts that actually work:
 
 - Live character data — class, level, spell gems, loaded plugins
 - Accurate TLO/type reference — pulled from the running MQ instance and enriched with mq-definitions, so Claude knows the real member names and signatures instead of guessing
