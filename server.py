@@ -16,6 +16,9 @@ cfg    = load_config()
 actor  = MQActorClient(cfg.pipe_name, cfg.actor_name, cfg.actor_mailbox)
 mcp    = FastMCP("mq-mcp")
 
+# TLO cache keyed by character UUID — populated at startup and on demand.
+_tlo_cache: dict[str, dict] = {}
+
 
 # ------------------------------------------------------------------
 # Setup / config tools
@@ -39,6 +42,8 @@ async def get_config() -> dict:
         "mq_definitions_ready": defs_path is not None,
         "mq_connected":         actor.is_connected(),
         "connected_characters": [c["character"] for c in actor.list_clients()],
+        "tlo_cache_ready":      [c["character"] for c in actor.list_clients()
+                                 if c["uuid"] in _tlo_cache],
     }
 
 
@@ -154,40 +159,72 @@ async def mq_eval(code: str, character: str = "") -> dict:
                             timeout=cfg.rpc_timeout, character=character)
 
 
-@mcp.tool()
-async def get_tlo_reference(character: str = "") -> dict:
-    """Get the full TLO type reference — all types, members, and inheritance.
-
-    Combines runtime introspection from MQ with mq-definitions documentation.
-    Results are cached in MQ until refresh_tlo_types() is called.
-
-    Args:
-        character: Character to introspect from. Omit to use the first connected character.
-    """
-    return await actor.call(
+async def _build_tlo_cache(character: str = "") -> dict:
+    """Fetch TLO types via RPC, cache by UUID, and return the result."""
+    client = actor.get_client(character)
+    result = await actor.call(
         cfg.lua_mailbox,
         {"type": "get_tlo_types", "max_scan": cfg.max_member_scan},
         timeout=60.0,
         character=character,
     )
+    if client:
+        _tlo_cache[client["uuid"]] = result
+        log.info("TLO cache built for %s (%d types)",
+                 client["character"], len(result.get("types") or {}))
+    return result
+
+
+async def _warm_tlo_cache():
+    """Background task: build TLO cache for all connected characters at startup."""
+    await asyncio.sleep(3)   # let MQ identity responses settle
+    for client in actor.list_clients():
+        if client["uuid"] not in _tlo_cache:
+            try:
+                await _build_tlo_cache(client["character"])
+            except Exception as e:
+                log.warning("TLO warm-up failed for %s: %s", client["character"], e)
+
+
+@mcp.tool()
+async def get_tlo_reference(character: str = "") -> dict:
+    """Get the full TLO type reference — all types, members, and inheritance.
+
+    Combines runtime introspection from MQ with mq-definitions documentation.
+    Built at server startup and cached — returns immediately on subsequent calls.
+    Use refresh_tlo_types() to rebuild after loading or unloading plugins.
+
+    Args:
+        character: Character to introspect from. Omit to use the first connected character.
+    """
+    client = actor.get_client(character)
+    if client and client["uuid"] in _tlo_cache:
+        return _tlo_cache[client["uuid"]]
+    return await _build_tlo_cache(character)
 
 
 @mcp.tool()
 async def refresh_tlo_types(character: str = "") -> str:
-    """Force MQ to re-run TLO type introspection.
+    """Rebuild the TLO type reference from scratch.
 
-    Useful after loading or unloading plugins that register new types.
+    Clears the cached reference and re-runs introspection. Use this after
+    loading or unloading plugins that register new TLO types.
 
     Args:
         character: Character to refresh on. Omit to use the first connected character.
     """
-    result = await actor.call(
+    client = actor.get_client(character)
+    if client:
+        _tlo_cache.pop(client["uuid"], None)
+    # Tell Lua to invalidate its cache too, then rebuild
+    await actor.call(
         cfg.lua_mailbox,
         {"type": "refresh_tlo_types", "max_scan": cfg.max_member_scan},
         timeout=60.0,
         character=character,
     )
-    return result.get("status", "done")
+    await _build_tlo_cache(character)
+    return "ok"
 
 
 # ------------------------------------------------------------------
@@ -200,7 +237,12 @@ def main():
         actor.connect()
     except Exception as e:
         log.warning("Could not connect to MQ pipe: %s — game state tools will fail until MQ is running", e)
-    asyncio.run(mcp.run_stdio_async())
+
+    async def _run():
+        asyncio.create_task(_warm_tlo_cache())
+        await mcp.run_stdio_async()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
