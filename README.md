@@ -54,7 +54,7 @@ Copy `config.json.example` to `config.json` and set your MQ lua path:
 }
 ```
 
-That's the only required change. Optionally set `mq_definitions_path` to a local [mq-definitions](https://github.com/macroquest/mq-definitions) clone for richer TLO docs (member descriptions, types, signatures). Without it, the TLO reference will include member names from runtime introspection but no documentation.
+That's the only required change. mq-definitions are optional but recommended — they add member descriptions, types, and signatures to the TLO reference. Claude can download and configure them for you automatically (it will ask when you first use `get_tlo_reference`).
 
 ### 3. Install the in-game Lua script
 
@@ -99,6 +99,8 @@ The server connects to MQ automatically on startup. If MQ isn't running, the scr
 | `list_scripts` | List all `.lua` files in your MQ lua directory |
 | `read_script` | Read a Lua script by name |
 | `write_script` | Write a Lua script directly to your MQ lua directory |
+| `get_config` | Check current configuration status (paths, mq-definitions, MQ connection) |
+| `download_mq_definitions` | Clone mq-definitions from GitHub and update config.json |
 
 ### mq_eval examples
 

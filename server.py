@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import subprocess
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -13,6 +15,62 @@ log = logging.getLogger(__name__)
 cfg    = load_config()
 actor  = MQActorClient(cfg.pipe_name, cfg.actor_name, cfg.actor_mailbox)
 mcp    = FastMCP("mq-mcp")
+
+
+# ------------------------------------------------------------------
+# Setup / config tools
+# ------------------------------------------------------------------
+
+_MQ_DEFS_REPO = "https://github.com/macroquest/mq-definitions"
+_MQ_DEFS_DEFAULT = Path(__file__).parent / "mq-definitions"
+
+
+@mcp.tool()
+async def get_config() -> dict:
+    """Return the current mq-mcp configuration status.
+
+    Use this to check what is and isn't set up before attempting other tools.
+    """
+    defs_path = cfg.mq_definitions_path
+    return {
+        "mq_lua_path":          str(cfg.mq_lua_path),
+        "mq_lua_path_exists":   cfg.mq_lua_path.exists(),
+        "mq_definitions_path":  str(defs_path) if defs_path else None,
+        "mq_definitions_ready": defs_path is not None,
+        "mq_connected":         actor.is_connected(),
+    }
+
+
+@mcp.tool()
+async def download_mq_definitions(install_path: str = "") -> str:
+    """Clone mq-definitions from GitHub and update config.json.
+
+    Downloads https://github.com/macroquest/mq-definitions to the given path
+    (defaults to a 'mq-definitions' folder next to server.py) and saves the
+    path to config.json so it is used automatically on next startup.
+
+    Args:
+        install_path: Where to clone the repo. Leave blank for the default location.
+    """
+    target = Path(install_path) if install_path else _MQ_DEFS_DEFAULT
+
+    if target.exists():
+        return f"mq-definitions already exists at {target} — no download needed."
+
+    try:
+        subprocess.run(
+            ["git", "clone", _MQ_DEFS_REPO, str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"git clone failed: {e.stderr.strip()}") from e
+    except FileNotFoundError:
+        raise RuntimeError("git not found — please install Git and try again.")
+
+    cfg.set_mq_definitions_path(target)
+    return f"Downloaded mq-definitions to {target} and updated config.json."
 
 
 # ------------------------------------------------------------------

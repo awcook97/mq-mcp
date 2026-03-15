@@ -13,30 +13,39 @@ _DEFAULTS = {
     "rpc_timeout": 10.0,
 }
 
-_BUNDLED_MQ_DEFS = Path(__file__).parent / "mq-definitions"
+_CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
 class Config:
-    def __init__(self, data: dict):
-        self._data = {**_DEFAULTS, **data}
+    def __init__(self, data: dict, config_path: Path = _CONFIG_PATH):
+        self._data      = {**_DEFAULTS, **data}
+        self._config_path = config_path
+
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
 
     @property
     def mq_lua_path(self) -> Path:
         return Path(self._data["mq_lua_path"])
 
     @property
-    def mq_definitions_path(self) -> Path:
+    def mq_definitions_path(self) -> Optional[Path]:
         raw = self._data.get("mq_definitions_path")
         if raw:
             p = Path(raw)
             if p.exists():
                 return p
-        if _BUNDLED_MQ_DEFS.exists():
-            return _BUNDLED_MQ_DEFS
-        raise FileNotFoundError(
-            "mq-definitions not found. Set mq_definitions_path in config.json "
-            "or run: git clone https://github.com/macroquest/mq-definitions"
-        )
+        return None
+
+    def set_mq_definitions_path(self, path: Path):
+        """Update mq_definitions_path in memory and persist to config.json."""
+        self._data["mq_definitions_path"] = str(path)
+        with self._config_path.open() as f:
+            raw = json.load(f)
+        raw["mq_definitions_path"] = str(path)
+        with self._config_path.open("w") as f:
+            json.dump(raw, f, indent=4)
 
     @property
     def pipe_name(self) -> str:
@@ -64,7 +73,7 @@ class Config:
 
 
 def load_config(path: Optional[Path] = None) -> Config:
-    config_path = path or Path(__file__).parent / "config.json"
+    config_path = path or _CONFIG_PATH
     if not config_path.exists():
         raise FileNotFoundError(
             f"config.json not found at {config_path}. "
@@ -72,4 +81,4 @@ def load_config(path: Optional[Path] = None) -> Config:
         )
     with config_path.open() as f:
         data = json.load(f)
-    return Config(data)
+    return Config(data, config_path)
