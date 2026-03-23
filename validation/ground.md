@@ -3,10 +3,16 @@
 | | Count |
 |---|---|
 | Runtime members | 18 |
-| Documented members | 25 |
-| Matched | 18 |
-| Missing from defs | 0 |
+| Documented members | 24 |
+| Matched | 17 |
+| Missing from defs | 1 |
 | Stale in defs | 7 |
+
+## Missing from mq-definitions
+
+In-game but no `@field` in the definitions.
+
+- `search`
 
 ## Stale in mq-definitions
 

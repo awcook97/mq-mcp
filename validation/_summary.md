@@ -33,7 +33,7 @@
 | fellowshipmember | 6 | 6 | 1 | 1 | gaps |
 | float | 7 | 6 | 2 | 1 | gaps |
 | framelimiter | 10 | 10 | 0 | 0 | ok |
-| ground | 18 | 25 | 0 | 7 | gaps |
+| ground | 18 | 24 | 1 | 7 | gaps |
 | group | 21 | 22 | 2 | 3 | gaps |
 | groupmember | 15 | 13 | 3 | 1 | gaps |
 | heading | 5 | 5 | 0 | 0 | ok |
@@ -63,7 +63,6 @@
 | social | 5 | 4 | 2 | 1 | gaps |
 | spawn | 141 | 152 | 11 | 22 | gaps |
 | spell | 88 | 57 | 33 | 2 | gaps |
-| stick | 16 | 16 | 0 | 0 | ok |
 | switch | 17 | 23 | 2 | 8 | gaps |
 | target | 39 | 39 | 3 | 3 | gaps |
 | task | 12 | 21 | 2 | 11 | gaps |
