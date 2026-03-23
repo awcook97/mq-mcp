@@ -275,6 +275,12 @@ class MQActorClient:
         with self._clients_lock:
             return list(self._mq_clients.values())
 
+    def refresh_clients(self):
+        """Clear the client cache and re-request identities from MQ."""
+        with self._clients_lock:
+            self._mq_clients.clear()
+        self._request_identities()
+
     def get_client(self, character: str = "") -> Optional[dict]:
         """Return a specific client by character name, or the first available client."""
         with self._clients_lock:

@@ -27,7 +27,10 @@ def _on_incoming_message(msg: dict, from_uuid: str):
     """Handle push messages from Lua (called on the asyncio event loop)."""
     if not isinstance(msg, dict):
         return
-    if msg.get("type") == "tlo_complete":
+    if msg.get("type") == "announce":
+        # Lua script (re)started — refresh identity cache so the new UUID is picked up
+        actor.refresh_clients()
+    elif msg.get("type") == "tlo_complete":
         _tlo_cache[from_uuid] = {"types": msg.get("types")}
         log.info("TLO scan complete from uuid=%r (%d types)",
                  from_uuid, len((msg.get("types") or {})))
@@ -70,6 +73,18 @@ async def list_characters() -> list[dict]:
     Returns account, server, and character name for each connected client.
     Each character must have mq-mcp.lua running for mq_eval to work on them.
     """
+    return actor.list_clients()
+
+
+@mcp.tool()
+async def refresh_characters() -> list[dict]:
+    """Re-request character identities from MQ and return the updated list.
+
+    Use this after the game crashes and restarts, or after a new EQ client
+    connects. The server caches identities at startup; this forces a refresh.
+    """
+    actor.refresh_clients()
+    await asyncio.sleep(0.5)  # allow identity responses to arrive
     return actor.list_clients()
 
 
@@ -246,6 +261,74 @@ async def refresh_tlo_types(character: str = "") -> str:
 
 
 # ------------------------------------------------------------------
+# Definition validation tool
+# ------------------------------------------------------------------
+
+_GET_MEMBERS_LUA = """
+local t = mq.TLO.Type({type_name!r})
+if not t() then return nil end
+local members = {{}}
+local empty_run = 0
+for i = 0, 500 do
+    local m = t.Member(i)()
+    if m and m ~= '' then
+        table.insert(members, m)
+        empty_run = 0
+    else
+        empty_run = empty_run + 1
+        if empty_run >= 30 then break end
+    end
+end
+local parent = t.InheritedType and t.InheritedType() or nil
+return {{ members = members, inherits = (parent ~= '') and parent or nil }}
+"""
+
+
+@mcp.tool()
+async def validate_definitions(character: str = "") -> dict:
+    """Validate mq-definitions LuaCATS annotations against the live runtime type system.
+
+    Queries each documented type individually via mq_eval (no big scan loop).
+    For each type in mq-definitions, fetches its runtime members and compares.
+
+    Returns:
+    - undocumented_types   — types in runtime (mq.GetDataTypeNames) with no @class in defs
+    - undocumented_members — {type: [members]} present at runtime but missing @field in defs
+    - stale_members        — {type: [members]} in defs @field but absent at runtime
+    - summary              — counts
+
+    Args:
+        character: Character to introspect from. Omit to use the first connected character.
+    """
+    if not cfg.mq_definitions_path:
+        raise RuntimeError("mq_definitions_path not set in config.json")
+
+    from mq_definitions import parse_definitions, diff_against_runtime
+
+    defs = parse_definitions(cfg.mq_definitions_path)
+
+    # Build runtime type map by querying each type individually via mq_eval.
+    # Sleep between requests to avoid flooding the MQ pipe.
+    runtime_types: dict = {}
+    for type_name in defs:
+        code = _GET_MEMBERS_LUA.format(type_name=type_name)
+        try:
+            result = await actor.call(
+                cfg.lua_mailbox,
+                {"type": "eval", "code": code},
+                timeout=cfg.rpc_timeout,
+                character=character,
+            )
+            if isinstance(result, dict) and result.get("result"):
+                runtime_types[type_name] = result["result"]
+        except Exception as e:
+            log.warning("Failed to query type %r: %s", type_name, e)
+        await asyncio.sleep(0.1)  # give MQ time to breathe between queries
+
+    return diff_against_runtime(runtime_types, cfg.mq_definitions_path)
+
+
+# ------------------------------------------------------------------
 # Entrypoint
 # ------------------------------------------------------------------
 
@@ -258,7 +341,8 @@ def main():
 
     async def _run():
         actor.set_message_handler(_on_incoming_message, asyncio.get_running_loop())
-        asyncio.create_task(_warm_tlo_cache())
+        # _warm_tlo_cache disabled — big scan crashes MQ; use validate_definitions instead
+        # asyncio.create_task(_warm_tlo_cache())
         await mcp.run_stdio_async()
 
     asyncio.run(_run())
