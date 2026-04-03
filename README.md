@@ -89,6 +89,51 @@ claude mcp add mq-mcp -- C:\path\to\mq-mcp\.venv\Scripts\python C:\path\to\mq-mc
 
 The server connects to MQ automatically on startup. If MQ isn't running, the script/filesystem tools still work — only `mq_eval` and the TLO reference tools will fail.
 
+### 5.1 Add to Copilot CLI (optional)
+
+**Copilot CLI** - add to `~/.copilot/mcp-config.json`:
+```json
+{
+  "mcpServers": {
+    "mq-mcp": {
+      "type": "stdio",
+      "command": "/bin/bash",
+      "tools": [
+        "*"
+      ],
+      "args": [
+        "/home/andrew/Games/mq-mcp/start-server.sh"
+      ]
+    }
+  }
+}
+```
+
+alternatively, you can run the CLI and `/mcp` and follow the steps to adding the CLI from within there.
+
+## Linux Installation
+
+Everything is pretty much the same as on Windows. The main thing you have to do differently is set the WINEPREFIX that you are using in `start-server.sh` and set the pipename to `127.0.0.1:29999` in `config.json` instead of `\\.\pipe\mqpipe`. 
+
+If your computer is refusing to run `mqpipe_bridge.exe` through wine, for whatever reason, feel free to compile it yourself. Here's how:
+
+```C
+/*
+ * mqpipe_bridge.c
+ * Runs under Wine. Connects to \\.\pipe\mqpipe and proxies it to a
+ * TCP socket on 127.0.0.1:29999 so native Linux code can connect.
+ *
+ * Build:
+ *   x86_64-w64-mingw32-gcc mqpipe_bridge.c -o mqpipe_bridge.exe -lws2_32
+ * Run:
+ *   wine mqpipe_bridge.exe &
+ */
+ ```
+
+ If you get any errors, it's probably because you don't have mingw installed. Simply `sudo apt install mingw-w64` and try again.
+
+ Do note that I wasn't able to get the TLO reference tool working, but Claude & Copilot CLI can still connect to your characters, make them chase each other, and even debug your Lua scripts in real time.
+
 ## Available Tools
 
 | Tool | Description |
