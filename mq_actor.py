@@ -28,13 +28,10 @@ import struct
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Optional, Any
+import socket
 
-import pywintypes
-import win32api
-import win32event
-import win32file
-import win32pipe
+from pipe_transport import connect_pipe, close_pipe, pipe_read, pipe_write, PIPE_ERROR
 
 from proto import Routing_pb2, Actor_pb2
 
@@ -47,7 +44,7 @@ _WRITE_TIMEOUT_MS = 5_000
 _READ_TIMEOUT_MS  = 500   # short so recv loop can check _running
 
 
-def _dict_to_variant(value) -> "Actor_pb2.Variant":
+def _dict_to_variant(value) -> Actor_pb2.Variant:
     """Convert a Python dict/list/scalar to lua_actor::Variant protobuf."""
     v = Actor_pb2.Variant()
     if isinstance(value, bool):
@@ -67,7 +64,7 @@ def _dict_to_variant(value) -> "Actor_pb2.Variant":
     return v
 
 
-def _variant_to_dict(v: "Actor_pb2.Variant"):
+def _variant_to_dict(v: Actor_pb2.Variant) -> int | float | bool | str | dict[str | int, Any] | None:
     """Convert lua_actor::Variant protobuf to a plain Python value."""
     kind = v.WhichOneof("value")
     if kind == "number":
@@ -78,7 +75,7 @@ def _variant_to_dict(v: "Actor_pb2.Variant"):
     if kind == "str":
         return v.str
     if kind == "table":
-        result = {k: _variant_to_dict(val) for k, val in v.table.entries.items()}
+        result: dict[str | int, Any] = {k: _variant_to_dict(val) for k, val in v.table.entries.items()}
         for idx, val in v.table.arr.items():
             result[idx] = _variant_to_dict(val)
         return result
@@ -118,44 +115,11 @@ class MQNotConnectedError(Exception):
 
 
 def _overlapped_read(handle, buf_size: int, timeout_ms: int) -> Optional[bytes]:
-    """Blocking overlapped read with timeout. Returns bytes or None on timeout."""
-    buf = win32file.AllocateReadBuffer(buf_size)
-    ov  = pywintypes.OVERLAPPED()
-    ov.hEvent = win32event.CreateEvent(None, True, False, None)
-    try:
-        try:
-            win32file.ReadFile(handle, buf, ov)
-        except pywintypes.error as e:
-            if e.winerror != 997:   # ERROR_IO_PENDING is expected
-                raise
-        rc = win32event.WaitForSingleObject(ov.hEvent, timeout_ms)
-        if rc == win32event.WAIT_TIMEOUT:
-            win32file.CancelIo(handle)
-            win32event.WaitForSingleObject(ov.hEvent, win32event.INFINITE)
-            return None
-        n = win32file.GetOverlappedResult(handle, ov, False)
-        return bytes(buf[:n])
-    finally:
-        win32api.CloseHandle(ov.hEvent)
+    return pipe_read(handle, buf_size, timeout_ms)
 
 
 def _overlapped_write(handle, data: bytes, timeout_ms: int = _WRITE_TIMEOUT_MS):
-    """Blocking overlapped write with timeout."""
-    ov = pywintypes.OVERLAPPED()
-    ov.hEvent = win32event.CreateEvent(None, True, False, None)
-    try:
-        try:
-            win32file.WriteFile(handle, data, ov)
-        except pywintypes.error as e:
-            if e.winerror != 997:   # ERROR_IO_PENDING is expected
-                raise
-        rc = win32event.WaitForSingleObject(ov.hEvent, timeout_ms)
-        if rc == win32event.WAIT_TIMEOUT:
-            win32file.CancelIo(handle)
-            raise TimeoutError("WriteFile timed out")
-        win32file.GetOverlappedResult(handle, ov, False)
-    finally:
-        win32api.CloseHandle(ov.hEvent)
+    pipe_write(handle, data, timeout_ms)
 
 
 class MQActorClient:
@@ -167,7 +131,7 @@ class MQActorClient:
         self._actor_mailbox = actor_mailbox
         self._client_uuid   = str(uuid.uuid4())
 
-        self._pipe: Optional[object] = None
+        self._pipe: Optional[socket.socket] = None
         self._running = False
         self._write_lock = threading.Lock()
 
@@ -197,22 +161,8 @@ class MQActorClient:
     def connect(self):
         """Connect to the MQ named pipe and register our identity."""
         log.info("Opening pipe %s", self._pipe_name)
-        self._pipe = win32file.CreateFile(
-            self._pipe_name,
-            win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-            0,
-            None,
-            win32file.OPEN_EXISTING,
-            win32file.FILE_FLAG_OVERLAPPED,   # required for concurrent R/W
-            None,
-        )
-        log.info("Pipe opened, setting message mode")
-        win32pipe.SetNamedPipeHandleState(
-            self._pipe,
-            win32pipe.PIPE_READMODE_MESSAGE,
-            None,
-            None,
-        )
+        self._pipe = connect_pipe(self._pipe_name)
+        log.info("Pipe opened")
         self._running = True
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True, name="mq-recv")
         self._recv_thread.start()
@@ -227,10 +177,7 @@ class MQActorClient:
     def disconnect(self):
         self._running = False
         if self._pipe:
-            try:
-                win32file.CloseHandle(self._pipe)
-            except Exception:
-                pass
+            close_pipe(self._pipe)
             self._pipe = None
         self._fail_pending(MQNotConnectedError("Disconnected"))
 
@@ -280,6 +227,22 @@ class MQActorClient:
         with self._clients_lock:
             self._mq_clients.clear()
         self._request_identities()
+
+    def register_client(self, uuid: str, character: str, pid: int = 0,
+                        account: str = "", server: str = "") -> None:
+        """Directly register an EQ client (e.g. from an announce message)."""
+        if not uuid or not character:
+            return
+        entry = {
+            "uuid":      uuid,
+            "pid":       pid,
+            "account":   account,
+            "server":    server,
+            "character": character,
+        }
+        with self._clients_lock:
+            self._mq_clients[uuid] = entry
+        log.info("Registered EQ client directly: character=%r uuid=%r", character, uuid)
 
     def get_client(self, character: str = "") -> Optional[dict]:
         """Return a specific client by character name, or the first available client."""
@@ -353,7 +316,12 @@ class MQActorClient:
             raise RuntimeError(f"MQ routing error (status={result_envelope.status}): {err_str}")
 
         try:
-            return _variant_to_dict(Actor_pb2.Variant.FromString(result_envelope.payload))
+            result = _variant_to_dict(Actor_pb2.Variant.FromString(result_envelope.payload))
+            if not isinstance(result, dict):
+                raise RuntimeError(f"Expected table reply, got {type(result).__name__}: {result!r}")
+            return result
+        except RuntimeError:
+            raise
         except Exception as parse_exc:
             raw = result_envelope.payload
             hint = raw.decode("utf-8", errors="replace")[:200] if raw else "(empty)"
@@ -388,11 +356,19 @@ class MQActorClient:
         # Launcher parses MSG_IDENTIFICATION as raw Identification (not AddIdentity wrapper)
         self._send_raw(_MsgId.IDENTIFICATION, _Mode.SIMPLE, 0, ident.SerializeToString())
 
+    @staticmethod
+    def _dbg(msg: str):
+        import os as _os
+        with open("/tmp/mq-mcp-startup.log", "a") as _f:
+            _f.write(f"[recv:{_os.getpid()}] {msg}\n")
+            _f.flush()
+
     def _recv_loop(self):
+        self._dbg("recv_loop started")
         while self._running:
             try:
                 data = _overlapped_read(self._pipe, _READ_BUFFER, _READ_TIMEOUT_MS)
-            except pywintypes.error as e:
+            except PIPE_ERROR as e:
                 if self._running:
                     log.warning("Pipe read error: %s", e)
                     self._running = False
@@ -413,6 +389,7 @@ class MQActorClient:
             hdr     = _unpack_header(data)
             payload = data[_HEADER_SIZE: _HEADER_SIZE + hdr["length"]]
 
+            self._dbg(f"recv msg_id={hdr['msg_id']} mode={hdr['mode']} seq={hdr['seq']} len={hdr['length']}")
             log.debug("Recv: msg_id=%d mode=%d seq=%d len=%d",
                       hdr["msg_id"], hdr["mode"], hdr["seq"], hdr["length"])
 
@@ -452,10 +429,11 @@ class MQActorClient:
             ident = Routing_pb2.Identification()
             ident.ParseFromString(payload)
             pid = ident.process.pid
-            if not pid or pid == os.getpid():
-                return
             uid        = ident.uuid or ""
             has_client = ident.HasField('client')
+            self._dbg(f"ident pid={pid} uuid={uid!r} name={ident.name!r} has_client={has_client} char={ident.client.character if has_client else 'n/a'!r} self_pid={os.getpid()}")
+            if not pid or pid == os.getpid():
+                return
             log.info("Identity: pid=%d uuid=%r name=%r has_client=%s",
                      pid, uid, ident.name, has_client)
             if has_client and uid:
@@ -501,6 +479,21 @@ class MQActorClient:
                         if c["character"].lower() == ra.client.character.lower():
                             from_uuid = uid
                             break
+
+            # Auto-register EQ client from return_address if it has client identity
+            if from_uuid and ra.HasField("client") and ra.client.character:
+                pid = ra.process.pid  # 0 if container oneof is not "process"
+                with self._clients_lock:
+                    if from_uuid not in self._mq_clients:
+                        self._mq_clients[from_uuid] = {
+                            "uuid":      from_uuid,
+                            "pid":       pid,
+                            "account":   ra.client.account or "",
+                            "server":    ra.client.server or "",
+                            "character": ra.client.character,
+                        }
+                        log.info("Auto-registered from return_address: character=%r uuid=%r",
+                                 ra.client.character, from_uuid)
 
             log.info("Incoming ROUTE: from_name=%r from_uuid=%r", ra.name, from_uuid)
 

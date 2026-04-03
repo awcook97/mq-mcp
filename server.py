@@ -25,11 +25,21 @@ _tlo_scan_events: dict[str, asyncio.Event] = {}
 
 def _on_incoming_message(msg: dict, from_uuid: str):
     """Handle push messages from Lua (called on the asyncio event loop)."""
+    _dbg(f"incoming msg: {msg!r} from_uuid={from_uuid!r}")
     if not isinstance(msg, dict):
         return
     if msg.get("type") == "announce":
-        # Lua script (re)started — refresh identity cache so the new UUID is picked up
-        actor.refresh_clients()
+        # Lua script (re)started — register the character from the announce payload.
+        # The announce includes the character name; combined with from_uuid we can
+        # register without relying on the IDENTIFICATION broadcast mechanism.
+        character = msg.get("character") or ""
+        _dbg(f"announce: character={character!r} from_uuid={from_uuid!r}")
+        if from_uuid and character:
+            actor.register_client(from_uuid, character)
+        else:
+            # Fallback: request identities via IDENTIFICATION broadcast
+            _dbg("announce: missing uuid or character, falling back to refresh_clients")
+            actor.refresh_clients()
     elif msg.get("type") == "tlo_complete":
         _tlo_cache[from_uuid] = {"types": msg.get("types")}
         log.info("TLO scan complete from uuid=%r (%d types)",
@@ -332,8 +342,91 @@ async def validate_definitions(character: str = "") -> dict:
 # Entrypoint
 # ------------------------------------------------------------------
 
+def _start_bridge():
+    """Ensure the pipe bridge is running.
+
+    If the bridge is already accepting connections, do nothing.
+    Otherwise start a new wine bridge process without killing anything —
+    wineserver (shared with MacroQuest) must never be killed.
+
+    stdout/stderr are redirected to DEVNULL — the MCP protocol owns stdout,
+    so any output from the bridge would corrupt the stream.
+    """
+    import socket
+    import time
+
+    bridge = Path(__file__).parent / "mqpipe_bridge.exe"
+    if not bridge.exists():
+        log.warning("mqpipe_bridge.exe not found — skipping bridge auto-start")
+        return
+
+    # Parse host:port from config
+    pipe_name = cfg.pipe_name
+    if ":" in pipe_name and not pipe_name.startswith("\\"):
+        host, port_str = pipe_name.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host, port = "127.0.0.1", 29999
+
+    def _port_listening() -> bool:
+        """Check if something is already bound to the bridge port WITHOUT connecting.
+
+        Connecting would trigger the bridge to accept and block on open_pipe(),
+        consuming its single connection slot before actor.connect() can use it.
+        Instead, try to bind to the same port — if that fails, something owns it.
+        """
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, port))
+            probe.close()
+            return False  # bind succeeded → port is free → bridge not running
+        except OSError:
+            return True   # bind failed → port in use → bridge already running
+
+    if _port_listening():
+        log.info("Bridge already up on %s:%d", host, port)
+        return
+
+    # Bridge is down. Don't touch wineserver (MacroQuest lives there).
+    # Just launch a new bridge instance; if wineserver still holds the port
+    # from the previous dead bridge, the new process will exit immediately
+    # and we wait for the port to free up before trying again.
+    log.info("Bridge not running — starting wine mqpipe_bridge.exe")
+    try:
+        subprocess.Popen(
+            ["wine", str(bridge)],
+            cwd=str(Path(__file__).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        log.warning("wine not found — cannot auto-start bridge")
+        return
+
+    # Poll until bridge is up (up to ~5 s)
+    for _ in range(10):
+        time.sleep(0.5)
+        if _port_listening():
+            log.info("Bridge up on %s:%d", host, port)
+            return
+
+    log.warning("Bridge did not come up after 5 s on %s:%d", host, port)
+
+
+def _dbg(msg):
+    """Write directly to debug log — bypasses logging config entirely."""
+    import os, traceback as _tb
+    with open("/tmp/mq-mcp-startup.log", "a") as f:
+        f.write(f"[{os.getpid()}] {msg}\n")
+        f.flush()
+
 def main():
     logging.basicConfig(level=logging.INFO)
+    _dbg("main() entered")
+    _start_bridge()
+    _dbg("bridge done")
     try:
         actor.connect()
     except Exception as e:

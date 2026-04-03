@@ -23,7 +23,7 @@ def _parse_file(path: Path) -> dict[str, set[str]]:
         m = _CLASS_RE.match(line)
         if m:
             current_class = m.group(1).lower()
-            if current_class not in result:
+            if current_class not in result and current_class is not None:
                 result[current_class] = set()
             continue
 
