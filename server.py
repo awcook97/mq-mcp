@@ -417,10 +417,13 @@ def _start_bridge():
 
 def _dbg(msg):
     """Write directly to debug log — bypasses logging config entirely."""
-    import os, traceback as _tb
-    with open("/tmp/mq-mcp-startup.log", "a") as f:
-        f.write(f"[{os.getpid()}] {msg}\n")
-        f.flush()
+    import os
+    try:
+        with open("/tmp/mq-mcp-startup.log", "a") as f:
+            f.write(f"[{os.getpid()}] {msg}\n")
+            f.flush()
+    except OSError:
+        pass
 
 def main():
     logging.basicConfig(level=logging.INFO)

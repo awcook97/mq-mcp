@@ -10,6 +10,7 @@ build/
 
 # Config (contains local paths)
 config.json
+start-server.sh
 
 # mq-definitions bundled clone (fetched at setup)
 mq-definitions/

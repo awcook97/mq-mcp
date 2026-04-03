@@ -102,7 +102,7 @@ The server connects to MQ automatically on startup. If MQ isn't running, the scr
         "*"
       ],
       "args": [
-        "/home/andrew/Games/mq-mcp/start-server.sh"
+        "/path/to/mq-mcp/start-server.sh"
       ]
     }
   }
@@ -113,7 +113,10 @@ alternatively, you can run the CLI and `/mcp` and follow the steps to adding the
 
 ## Linux Installation
 
-Everything is pretty much the same as on Windows. The main thing you have to do differently is set the WINEPREFIX that you are using in `start-server.sh` and set the pipename to `127.0.0.1:29999` in `config.json` instead of `\\.\pipe\mqpipe`. 
+Everything is pretty much the same as on Windows. The main differences:
+
+1. Copy `start-server.sh.example` to `start-server.sh` and adjust `WINEPREFIX` and any other paths for your system. (`start-server.sh` is gitignored — it's your local launcher.)
+2. Set the pipename to `127.0.0.1:29999` in `config.json` instead of `\\.\pipe\mqpipe`.
 
 If your computer is refusing to run `mqpipe_bridge.exe` through wine, for whatever reason, feel free to compile it yourself. Here's how:
 
